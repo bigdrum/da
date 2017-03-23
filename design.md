@@ -152,16 +152,21 @@ When a change feed is created, the Da would setup a trigger on the data table an
 
 Because the use of Notify/Listen, the change from other client is correctly handled.
 
-### Maintenance
-
-### Master-master replication
-
-Da does not plan to support master-master replication. It would rely on the undelying SQL DB replication.
-
 ### Conditional query and ordering
 
 Da would expose the SQL DB’s SELECT feature on both table and view, to make it possible to support complex query without the need to build extra view.
 
-## MILESTONES
+### Transaction
 
-TBD
+Da should replies on the underlying SQL DB's transaction. It requires serializable transaction.
+
+### Maintenance
+
+Da needs to perform some maintenance to:
+
+* GC old document revisions (time-based or size-based).
+* GC old view results.
+
+### Master-master replication
+
+Da does not plan to support master-master replication at this moment.
