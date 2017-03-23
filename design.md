@@ -10,11 +10,23 @@ It is implemented purely on client side library so no extra server deployment is
 
 ## GOALS
 
-1. Implements all features of couchdb. Notably, mapreduce view, change feed, versioned, master-master replication.
+1. Implements many of the features of CouchDB. Notably, mapreduce view, change feed, versioned, master-master replication.
 
 2. Explore more advanced feature, such as multi-key transaction. Multi-stage mapreduce etc.
 
 3. Explore full text search.
+
+## Why
+
+* For fun.
+* Differences to CouchDB:
+  * Supports multi-document transaction.
+  * Potentially better performance.
+  * More flexible query language.
+* Differences to (raw SQL) with PostgresSQL:
+  * Basically a nice interface for people familiar with CouchDB.
+  * CouchDB style mapreduce view provides very flexible document oriented way to model and query data.
+  * Provides a CouchDB style change feed implementation.
 
 ## SPECIFICATIONS
 
@@ -28,7 +40,7 @@ Document - A document is equivalent to a couchdb document. A document is identif
 
 ### Data Table schemas
 
-For each Da Table, there is a data table created on PostgresSQL. Each schema would look like:
+For each Da Table, there is a SQL DB table created store the data. Its schema would look like:
 
 <table>
   <tr>
@@ -169,4 +181,4 @@ Da needs to perform some maintenance to:
 
 ### Master-master replication
 
-Da does not plan to support master-master replication at this moment.
+While possible, Da does not plan to support master-master replication for the initial implementation.
