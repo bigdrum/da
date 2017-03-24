@@ -4,7 +4,7 @@
 
 ## OVERVIEW
 
-Dabase or Da is provides a couchdb like document store solution based on SQL Database (currently is PostgresSQL, in theory, it should work on CockroachDB which provides horizontal scaling).
+Dabase or Da is provides a CouchDB like document store solution based on SQL Database.
 
 It is implemented purely on client side library so no extra server deployment is required.
 
@@ -14,7 +14,6 @@ It is implemented purely on client side library so no extra server deployment is
 
 2. Explore more advanced feature, such as multi-key transaction. Multi-stage mapreduce etc.
 
-3. Explore full text search.
 
 ## Why
 
@@ -23,7 +22,7 @@ It is implemented purely on client side library so no extra server deployment is
   * Supports multi-document transaction.
   * Potentially better performance.
   * More flexible query language.
-* Differences to (raw SQL) with PostgresSQL:
+* Differences to (raw SQL) with SQL DB (Particularly, PostgresSQL):
   * Basically a nice interface for people familiar with CouchDB.
   * CouchDB style mapreduce view provides very flexible document oriented way to model and query data.
   * Provides a CouchDB style change feed implementation.
@@ -210,4 +209,4 @@ Da needs to perform some maintenance to:
 
 ### Master-master replication
 
-While possible, Da does not plan to support master-master replication for the initial implementation.
+It should be possible to use the same CouchDB algorithm to implement master-master replication.
