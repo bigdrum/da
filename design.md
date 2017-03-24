@@ -210,3 +210,7 @@ Da needs to perform some maintenance to:
 ### Master-master replication
 
 It should be possible to use the same CouchDB algorithm to implement master-master replication.
+
+## TODO
+
+Complete all SQL table schema design.
