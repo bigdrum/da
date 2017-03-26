@@ -1,0 +1,53 @@
+{
+    "memo": "",
+    "projects": [
+        {
+            "name": "github.com/cenk/backoff",
+            "branch": "master",
+            "revision": "3db60c813733fce657c114634171689bbf1f8dee",
+            "packages": [
+                "."
+            ]
+        },
+        {
+            "name": "github.com/fsouza/go-dockerclient",
+            "branch": "master",
+            "revision": "e0d22d30691bcc996eca51f729a4777b8c7dc2a8",
+            "packages": [
+                "."
+            ]
+        },
+        {
+            "name": "github.com/lib/pq",
+            "branch": "master",
+            "revision": "e51fec16be7847e24d0270a5ce1f95cf2482b5e9",
+            "packages": [
+                "."
+            ]
+        },
+        {
+            "name": "github.com/pkg/errors",
+            "branch": "master",
+            "revision": "ff09b135c25aae272398c51a07235b90a75aa4f0",
+            "packages": [
+                "."
+            ]
+        },
+        {
+            "name": "golang.org/x/net",
+            "branch": "master",
+            "revision": "b400c2eff1badec7022a8c8f5bea058b6315eed7",
+            "packages": [
+                "context"
+            ]
+        },
+        {
+            "name": "gopkg.in/ory-am/dockertest.v3",
+            "branch": "master",
+            "revision": "0944e3b802903cb0515b253fb8fe758b019bb052",
+            "packages": [
+                "."
+            ]
+        }
+    ]
+}

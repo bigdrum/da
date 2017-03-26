@@ -1,0 +1,10 @@
+{
+    "dependencies": {
+        "github.com/lib/pq": {
+            "branch": "master"
+        },
+        "gopkg.in/ory-am/dockertest.v3": {
+            "branch": "master"
+        }
+    }
+}
