@@ -1,14 +1,17 @@
 package da
 
-// DB manages a database.
-type DB struct{}
+import (
+	"database/sql"
+)
 
-// OpenDB opens a DB.
-func OpenDB() *DB {
-	return nil
+// DB manages a database.
+type DB struct {
+	sqlDB *sql.DB
 }
 
-// Table returns a table of given name.
-func (db *DB) Table(name string) *Table {
-	return nil
+// OpenDB opens a DB.
+func OpenDB(sqlDB *sql.DB) *DB {
+	return &DB{
+		sqlDB: sqlDB,
+	}
 }
