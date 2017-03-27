@@ -61,4 +61,28 @@ func TestCRUD(t *testing.T) {
 			t.Error("unexpected modified: ", doc.Modified)
 		}
 	}
+
+	{
+		err = tbl.Delete(ctx, "p:1", 1)
+		if err == nil {
+			t.Fatal("expecting error in delete")
+		}
+		if err.(da.Error).Kind != da.ErrConflict {
+			t.Fatal("expecting conflict error: ", err)
+		}
+
+		err = tbl.Delete(ctx, "p:1", 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		doc := da.Document{}
+		err = tbl.Get(ctx, "p:1", &doc)
+		if err == nil {
+			t.Fatal("expecting error in get")
+		}
+		if err.(da.Error).Kind != da.ErrNotFound {
+			t.Fatal("expecting not found error: ", err)
+		}
+	}
 }

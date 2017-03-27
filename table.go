@@ -45,8 +45,30 @@ func (db *DB) Table(ctx context.Context, name string) (*Table, error) {
 
 // Put sets a document of given id.
 func (tbl *Table) Put(ctx context.Context, id string, existVersion int64, data interface{}) error {
-	// TODO: This must be done in serializable transaction.
+	return tbl.insertInternal(ctx, id, existVersion, data, false)
+}
 
+// Get gets a document of given id.
+func (tbl *Table) Get(ctx context.Context, id string, doc *Document) error {
+	err := tbl.sqlDB.QueryRowContext(ctx, `SELECT
+		version, data, modified
+		FROM `+tbl.dataTable+` WHERE id = $1 AND LATEST = TRUE AND DELETED != TRUE`, id).Scan(
+		&doc.Version, &doc.Data, &doc.Modified)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return errorf(ErrNotFound, nil, "record not found: %s", id)
+		}
+		return err
+	}
+	return nil
+}
+
+// Delete delets a document of given id.
+func (tbl *Table) Delete(ctx context.Context, id string, version int64) error {
+	return tbl.insertInternal(ctx, id, version, nil, true)
+}
+
+func (tbl *Table) insertInternal(ctx context.Context, id string, existVersion int64, data interface{}, deleted bool) error {
 	var preVersion int64
 	err := tbl.sqlDB.QueryRowContext(ctx, `SELECT version FROM `+tbl.dataTable+` WHERE id = $1 AND LATEST = TRUE`, id).Scan(&preVersion)
 	if err != nil {
@@ -66,27 +88,7 @@ func (tbl *Table) Put(ctx context.Context, id string, existVersion int64, data i
 		return err
 	}
 	_, err = tbl.sqlDB.ExecContext(ctx,
-		`INSERT INTO `+tbl.dataTable+` (id, version, data, latest, modified) VALUES ($1, $2, $3, TRUE, $4);`,
-		id, existVersion+1, data, time.Now().UTC())
+		`INSERT INTO `+tbl.dataTable+` (id, version, data, latest, modified, deleted) VALUES ($1, $2, $3, TRUE, $4, $5);`,
+		id, existVersion+1, data, time.Now().UTC(), deleted)
 	return err
-}
-
-// Get gets a document of given id.
-func (tbl *Table) Get(ctx context.Context, id string, doc *Document) error {
-	err := tbl.sqlDB.QueryRowContext(ctx, `SELECT
-		version, data, modified
-		FROM `+tbl.dataTable+` WHERE id = $1 AND LATEST = TRUE`, id).Scan(
-		&doc.Version, &doc.Data, &doc.Modified)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return errorf(ErrNotFound, nil, "record not found: %s", id)
-		}
-		return err
-	}
-	return nil
-}
-
-// Delete delets a document of given id.
-func (tbl *Table) Delete(ctx context.Context, id string, version int64) error {
-	return fmt.Errorf("not implemented")
 }
