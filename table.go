@@ -50,15 +50,23 @@ func (tbl *Table) Put(ctx context.Context, id string, existVersion int64, data i
 
 // Get gets a document of given id.
 func (tbl *Table) Get(ctx context.Context, id string, doc *Document) error {
-	err := tbl.sqlDB.QueryRowContext(ctx, `SELECT
-		version, data, modified
-		FROM `+tbl.dataTable+` WHERE id = $1 AND LATEST = TRUE AND DELETED != TRUE`, id).Scan(
-		&doc.Version, &doc.Data, &doc.Modified)
+	read := 0
+	err := tbl.ReadMulti(ctx, TableReadParams{
+		ID:     id,
+		Latest: true,
+	}, func(docIn *Document) error {
+		read++
+		*doc = *docIn
+		return nil
+	})
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return errorf(ErrNotFound, nil, "record not found: %s", id)
-		}
 		return err
+	}
+	if read == 0 {
+		return errorf(ErrNotFound, nil, "record not found: %s", id)
+	}
+	if read > 1 {
+		return fmt.Errorf("data inconsistent")
 	}
 	return nil
 }
@@ -66,6 +74,55 @@ func (tbl *Table) Get(ctx context.Context, id string, doc *Document) error {
 // Delete delets a document of given id.
 func (tbl *Table) Delete(ctx context.Context, id string, version int64) error {
 	return tbl.insertInternal(ctx, id, version, nil, true)
+}
+
+// TableReadParams contains optinal parameters for table read.
+type TableReadParams struct {
+	ID             string
+	MinSeq         int64 // The minimum sequence number, inclusive.
+	IncludeDeleted bool
+	Latest         bool
+	OrderBy        string
+	Offset         int
+	Limit          int
+}
+
+// ReadMulti reads multiple documents.
+func (tbl *Table) ReadMulti(ctx context.Context, p TableReadParams, action func(r *Document) error) error {
+	qb := newQueryBuilder()
+	qb.Add(`SELECT seq, id, version, data, modified FROM ` + tbl.dataTable + ` WHERE TRUE`)
+	if !p.IncludeDeleted {
+		qb.Add(` AND deleted = FALSE`)
+	}
+	qb.AddIfNotZero(` AND id = $1`, p.ID)
+	qb.AddIfNotZero(` AND seq >= $1`, p.MinSeq)
+	qb.AddIfNotZero(` AND latest = $1`, p.Latest)
+	qb.AddIfNotZero(` ORDER BY $1`, p.OrderBy)
+	qb.AddIfNotZero(` OFFSET $1`, p.Offset)
+	qb.AddIfNotZero(` LIMIT $1`, p.Limit)
+
+	rows, err := qb.Query(ctx, tbl.sqlDB)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var docs []Document
+	for rows.Next() {
+		doc := Document{}
+		if err := rows.Scan(
+			&doc.Seq, &doc.ID, &doc.Version, &doc.Data, &doc.Modified); err != nil {
+			return err
+		}
+		docs = append(docs, doc)
+
+	}
+	rows.Close()
+	for i := range docs {
+		if err := action(&docs[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (tbl *Table) insertInternal(ctx context.Context, id string, existVersion int64, data interface{}, deleted bool) error {

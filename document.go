@@ -1,11 +1,14 @@
 package da
 
 import "time"
+import "encoding/json"
 
-// Document represents a document of a version.
+// Document represents the document of a version.
 type Document struct {
 	ID       string
 	Version  int64
-	Data     interface{}
 	Modified time.Time
+	Seq      int64
+
+	Data json.RawMessage
 }

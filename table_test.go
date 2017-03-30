@@ -13,7 +13,7 @@ func TestCRUD(t *testing.T) {
 	db := da.OpenDB(sqlDB)
 	ctx := context.Background()
 
-	tbl, err := db.Table(ctx, "post")
+	tbl, err := db.Table(ctx, "crud_test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,8 +32,13 @@ func TestCRUD(t *testing.T) {
 		if doc.Version != 1 {
 			t.Error("unexpected version: ", doc.Version)
 		}
-		if string(doc.Data.([]byte)) != `"hello world"` {
-			t.Error("unexpected data: ", doc.Data)
+
+		data := ""
+		if err := json.Unmarshal(doc.Data, &data); err != nil {
+			t.Error(err)
+		}
+		if data != `hello world` {
+			t.Error("unexpected data: ", data)
 		}
 		if doc.Modified.IsZero() {
 			t.Error("unexpected modified: ", doc.Modified)
@@ -54,7 +59,11 @@ func TestCRUD(t *testing.T) {
 		if doc.Version != 2 {
 			t.Error("unexpected version: ", doc.Version)
 		}
-		if string(doc.Data.([]byte)) != `"hello world 2"` {
+		data := ""
+		if err := json.Unmarshal(doc.Data, &data); err != nil {
+			t.Error(err)
+		}
+		if data != `hello world 2` {
 			t.Error("unexpected data: ", doc.Data)
 		}
 		if doc.Modified.IsZero() {
@@ -81,8 +90,12 @@ func TestCRUD(t *testing.T) {
 		if err == nil {
 			t.Fatal("expecting error in get")
 		}
-		if err.(da.Error).Kind != da.ErrNotFound {
-			t.Fatal("expecting not found error: ", err)
+		if derr, ok := err.(da.Error); ok {
+			if derr.Kind != da.ErrNotFound {
+				t.Fatal("expecting not found error: ", err)
+			}
+		} else {
+			t.Fatal(err)
 		}
 	}
 }
