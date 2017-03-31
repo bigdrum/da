@@ -3,6 +3,7 @@ package da
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -90,7 +91,7 @@ type TableReadParams struct {
 // ReadMulti reads multiple documents.
 func (tbl *Table) ReadMulti(ctx context.Context, p TableReadParams, action func(r *Document) error) error {
 	qb := newQueryBuilder()
-	qb.Add(`SELECT seq, id, version, data, modified FROM ` + tbl.dataTable + ` WHERE TRUE`)
+	qb.Add(`SELECT seq, id, version, data, modified, deleted FROM ` + tbl.dataTable + ` WHERE TRUE`)
 	if !p.IncludeDeleted {
 		qb.Add(` AND deleted = FALSE`)
 	}
@@ -109,9 +110,13 @@ func (tbl *Table) ReadMulti(ctx context.Context, p TableReadParams, action func(
 	var docs []Document
 	for rows.Next() {
 		doc := Document{}
+		var pData *json.RawMessage
 		if err := rows.Scan(
-			&doc.Seq, &doc.ID, &doc.Version, &doc.Data, &doc.Modified); err != nil {
-			return err
+			&doc.Seq, &doc.ID, &doc.Version, &pData, &doc.Modified, &doc.Deleted); err != nil {
+			return fmt.Errorf("scan error: %v", err)
+		}
+		if pData != nil {
+			doc.Data = *pData
 		}
 		docs = append(docs, doc)
 

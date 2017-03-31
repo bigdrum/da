@@ -10,8 +10,8 @@ import (
 )
 
 func TestCRUD(t *testing.T) {
-	db := da.OpenDB(sqlDB)
 	ctx := context.Background()
+	db := da.OpenDB(ctx, sqlDB)
 
 	tbl, err := db.Table(ctx, "crud_test")
 	if err != nil {

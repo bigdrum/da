@@ -12,6 +12,7 @@ type View struct {
 	sqldb     *sql.DB
 	config    ViewConfig
 	dataTable string
+	metaStore *metaStore
 }
 
 // ViewConfig specifies the view.
@@ -36,8 +37,10 @@ type ViewEntry struct {
 
 func (input *ViewInput) changes(ctx context.Context, minSeq int64, action func(doc *Document) error) error {
 	return input.Table.ReadMulti(ctx, TableReadParams{
-		MinSeq: minSeq,
-		Latest: true,
+		MinSeq:         minSeq,
+		Latest:         true,
+		IncludeDeleted: true,
+		OrderBy:        "seq asc",
 	}, action)
 }
 
@@ -71,23 +74,34 @@ func (db *DB) View(ctx context.Context, config ViewConfig) (*View, error) {
 		sqldb:     db.sqlDB,
 		config:    config,
 		dataTable: dataTable,
+		metaStore: db.metaStore.At("view").At(config.Name),
 	}, nil
 }
 
-// Read reads a value of given key.
-func (v *View) Read(ctx context.Context, key string, each func(entry *ViewEntry) error) error {
-	currentSeq, err := v.currentSeq(ctx)
-	if err != nil {
-		return err
-	}
+// Refresh ensure the view is up-to-date.
+func (v *View) Refresh(ctx context.Context) error {
 	for _, input := range v.config.Inputs {
-		err := input.changes(ctx, currentSeq, func(doc *Document) error {
+		seqStore := v.metaStore.At(input.Table.name).At("last_seq")
+		var lastSeq int64
+		err := seqStore.Get(ctx, &lastSeq)
+		if err != nil && !IsError(err, ErrNotFound) {
+			return err
+		}
+
+		var seq int64
+		err = input.changes(ctx, lastSeq+1, func(doc *Document) error {
+			seq = doc.Seq
+
 			// TODO: Need a transaction here.
 			// TODO: The ops can be batched.
 			_, err := v.sqldb.ExecContext(ctx, `DELETE FROM `+v.dataTable+` WHERE doc_id = $1`, doc.ID)
 			if err != nil {
 				return err
 			}
+			if doc.Deleted {
+				return nil
+			}
+
 			var emitError error
 			err = v.config.Mapper(doc, func(ve *ViewEntry) {
 				var value interface{}
@@ -107,6 +121,19 @@ func (v *View) Read(ctx context.Context, key string, each func(entry *ViewEntry)
 		if err != nil {
 			return err
 		}
+		err = seqStore.Set(ctx, seq)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Read reads a value of given key.
+func (v *View) Read(ctx context.Context, key string, each func(entry *ViewEntry) error) error {
+	if err := v.Refresh(ctx); err != nil {
+		return err
 	}
 
 	rows, err := v.sqldb.QueryContext(
@@ -132,8 +159,4 @@ func (v *View) Read(ctx context.Context, key string, each func(entry *ViewEntry)
 		}
 	}
 	return nil
-}
-
-func (v *View) currentSeq(ctx context.Context) (int64, error) {
-	return 0, nil
 }

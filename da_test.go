@@ -36,38 +36,39 @@ func TestMain(m *testing.M) {
 		return hostName
 	}()
 
-	// pulls an image, creates a container based on it and runs it
-	resource, err := pool.Run("postgres", "9.5-alpine", []string{})
-	if err != nil {
-		log.Fatalf("Could not start resource: %s", err)
-	}
-
-	spec := fmt.Sprintf("postgres://postgres@%s:%s/postgres?sslmode=disable", dockerHost, resource.GetPort("5432/tcp"))
-	fmt.Printf("Postgres pulled: %s\n", spec)
-
-	// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
-	if err := pool.Retry(func() error {
-		var err error
-		sqlDB, err = sql.Open("postgres", spec)
+	code := func() int {
+		// pulls an image, creates a container based on it and runs it
+		resource, err := pool.Run("postgres", "9.5-alpine", []string{})
 		if err != nil {
-			return err
+			log.Fatalf("Could not start resource: %s", err)
 		}
-		err = sqlDB.Ping()
-		if err != nil {
-			return err
+		defer func() {
+			if err := pool.Purge(resource); err != nil {
+				log.Fatalf("Could not purge resource: %s", err)
+			}
+		}()
+
+		spec := fmt.Sprintf("postgres://postgres@%s:%s/postgres?sslmode=disable", dockerHost, resource.GetPort("5432/tcp"))
+		fmt.Printf("Postgres pulled: %s\n", spec)
+
+		// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
+		if err := pool.Retry(func() error {
+			var err error
+			sqlDB, err = sql.Open("postgres", spec)
+			if err != nil {
+				return err
+			}
+			err = sqlDB.Ping()
+			if err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
+			log.Fatalf("Could not connect to docker: %s", err)
 		}
-		return nil
-	}); err != nil {
-		log.Fatalf("Could not connect to docker: %s", err)
-	}
-	fmt.Println("Postgres started.")
+		fmt.Println("Postgres started.")
 
-	code := m.Run()
-
-	// You can't defer this because os.Exit doesn't care for defer
-	if err := pool.Purge(resource); err != nil {
-		log.Fatalf("Could not purge resource: %s", err)
-	}
-
+		return m.Run()
+	}()
 	os.Exit(code)
 }

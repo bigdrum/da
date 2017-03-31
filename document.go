@@ -9,6 +9,7 @@ type Document struct {
 	Version  int64
 	Modified time.Time
 	Seq      int64
+	Deleted  bool
 
 	Data json.RawMessage
 }

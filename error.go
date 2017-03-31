@@ -1,8 +1,11 @@
 package da
 
 import (
+	"errors"
 	"fmt"
 )
+
+var errUimplemented = errors.New("unimplemented")
 
 // Error implements error interface and Da uses it to return errors where
 // the client would be interested about its kind.
@@ -25,6 +28,15 @@ const (
 func (e Error) Error() string {
 	// TODO: Return kind.
 	return e.Message
+}
+
+// IsError returns whether the error has given kind.
+func IsError(err error, kind ErrorKind) bool {
+	derr, ok := err.(Error)
+	if !ok {
+		return false
+	}
+	return derr.Kind == kind
 }
 
 // errorf creates an error.
