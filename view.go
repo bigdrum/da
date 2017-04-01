@@ -9,10 +9,10 @@ import (
 
 // View provides a way to transform the underlying data.
 type View struct {
-	sqldb     *sql.DB
-	config    ViewConfig
-	dataTable string
-	metaStore *metaStore
+	sqldb       *sql.DB
+	config      ViewConfig
+	mapperTable string
+	metaStore   *metaStore
 }
 
 // ViewConfig specifies the view.
@@ -21,7 +21,7 @@ type ViewConfig struct {
 	Version string
 
 	Inputs []ViewInput
-	Mapper func(doc *Document, emit func(ve *ViewEntry)) error
+	Mapper func(doc *Document, emit func(ve *ViewEntry) error) error
 }
 
 // ViewInput specifies a view input.
@@ -62,19 +62,22 @@ func (db *DB) View(ctx context.Context, config ViewConfig) (*View, error) {
 	}
 	_, err := db.sqlDB.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 		seq     BIGSERIAL,
-		key     TEXT,
+		key     JSONB,
 		value   JSONB,
 		doc_id  TEXT,
 		doc_seq BIGINT,
-		PRIMARY KEY(seq))`, dataTable))
+		deleted BOOL DEFAULT FALSE,
+		PRIMARY KEY(seq),
+		UNIQUE(doc_id))`, dataTable))
 	if err != nil {
 		return nil, err
 	}
+
 	return &View{
-		sqldb:     db.sqlDB,
-		config:    config,
-		dataTable: dataTable,
-		metaStore: db.metaStore.At("view").At(config.Name),
+		sqldb:       db.sqlDB,
+		config:      config,
+		mapperTable: dataTable,
+		metaStore:   db.metaStore.At("view").At(config.Name),
 	}, nil
 }
 
@@ -94,7 +97,7 @@ func (v *View) Refresh(ctx context.Context) error {
 
 			// TODO: Need a transaction here.
 			// TODO: The ops can be batched.
-			_, err := v.sqldb.ExecContext(ctx, `DELETE FROM `+v.dataTable+` WHERE doc_id = $1`, doc.ID)
+			_, err := v.sqldb.ExecContext(ctx, `UPDATE `+v.mapperTable+` SET deleted = TRUE WHERE doc_id = $1`, doc.ID)
 			if err != nil {
 				return err
 			}
@@ -103,12 +106,23 @@ func (v *View) Refresh(ctx context.Context) error {
 			}
 
 			var emitError error
-			err = v.config.Mapper(doc, func(ve *ViewEntry) {
+			err = v.config.Mapper(doc, func(ve *ViewEntry) error {
 				var value interface{}
 				value = ve.Value
+				key, err := json.Marshal(ve.Key)
+				if err != nil {
+					return err
+				}
+
 				_, emitError = v.sqldb.ExecContext(ctx,
-					`INSERT INTO `+v.dataTable+` (key, value, doc_id, doc_seq) VALUES ($1, $2, $3, $4);`,
-					ve.Key, value, doc.ID, doc.Seq)
+					`INSERT INTO `+v.mapperTable+` (key, value, doc_id, doc_seq) VALUES ($1, $2, $3, $4)
+					ON CONFLICT (doc_id) DO UPDATE SET
+					key=excluded.key,
+					doc_seq=excluded.doc_seq,
+					value=excluded.value,
+					deleted=false;`,
+					key, value, doc.ID, doc.Seq)
+				return emitError
 			})
 			if emitError != nil {
 				return fmt.Errorf("emit error: %v", emitError)
@@ -136,8 +150,12 @@ func (v *View) Read(ctx context.Context, key string, each func(entry *ViewEntry)
 		return err
 	}
 
+	keyB, err := json.Marshal(key)
+	if err != nil {
+		return err
+	}
 	rows, err := v.sqldb.QueryContext(
-		ctx, `SELECT value FROM `+v.dataTable+` WHERE key = $1;`, key)
+		ctx, `SELECT value FROM `+v.mapperTable+` WHERE key = $1 AND deleted != TRUE;`, keyB)
 	if err != nil {
 		return err
 	}
@@ -160,3 +178,31 @@ func (v *View) Read(ctx context.Context, key string, each func(entry *ViewEntry)
 	}
 	return nil
 }
+
+// Reducer
+// * Scan where seq > last_seq order by key asc, doc asc
+// * Run reducer of same key store at level i. Each reducer output also stores the low (key,docid).
+// * When a (key,docid) input is updated, find the
+// * Assumption: (key, docid) is unique.
+//
+// a1: 1
+// a2: 2
+// a3: 4
+// b4: 1
+// c5: 2
+// c6: 3
+//
+// a1: 3
+// a3: 4
+// b4: 1
+// c5: 2
+// c6: 3
+//
+// a1: 7
+// b4: 1
+// c5: 5
+//
+// a1: 1
+//
+// a1,2: 5
+//

@@ -50,17 +50,16 @@ func TestView(t *testing.T) {
 				Table: tbl,
 			},
 		},
-		Mapper: func(doc *da.Document, emit func(ve *da.ViewEntry)) error {
+		Mapper: func(doc *da.Document, emit func(ve *da.ViewEntry) error) error {
 			mapperRuns++
 			d := map[string]interface{}{}
 			if err := json.Unmarshal(doc.Data, &d); err != nil {
 				return err
 			}
-			emit(&da.ViewEntry{
+			return emit(&da.ViewEntry{
 				Key:   d["title"].(string),
 				Value: json.RawMessage(`"value"`),
 			})
-			return nil
 		},
 	})
 	if err != nil {
@@ -81,12 +80,31 @@ func TestView(t *testing.T) {
 		t.Error(mapperRuns)
 	}
 
+	if err := tbl.Put(ctx, "p:1", 1, `{"title": "hello world 2"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	value = viewOneRaw(ctx, t, view, viewKey)
+	if mapperRuns != 2 {
+		t.Error(mapperRuns)
+	}
+	if value != nil {
+		t.Error(*value)
+	}
+	value = viewOneRaw(ctx, t, view, "hello world 2")
+	if mapperRuns != 2 {
+		t.Error(mapperRuns)
+	}
+	if value == nil {
+		t.Error("value is nil")
+	}
+
 	// Now delete the doc, and view entry should be deleted as well.
-	if err := tbl.Delete(ctx, "p:1", 1); err != nil {
+	if err := tbl.Delete(ctx, "p:1", 2); err != nil {
 		t.Fatal(err)
 	}
 	value = viewOneRaw(ctx, t, view, viewKey)
 	if value != nil {
-		t.Error(value)
+		t.Error(*value)
 	}
 }

@@ -31,7 +31,7 @@ func (db *DB) Table(ctx context.Context, name string) (*Table, error) {
 		metadata  JSONB,
 		modified  TIMESTAMP,
 		latest    BOOL,
-		deleted   BOOL,
+		deleted   BOOL DEFAULT FALSE,
 		PRIMARY KEY (seq)
 	 )`, dataTable))
 	if err != nil {

@@ -3,7 +3,6 @@ package da
 import (
 	"context"
 	"database/sql"
-	"fmt"
 )
 
 // metaStore stores metadata.
@@ -32,7 +31,6 @@ func (m *metaStore) Get(ctx context.Context, data interface{}) error {
 	err := m.sqlDB.QueryRowContext(
 		ctx, `SELECT value FROM `+m.tableName+` WHERE key = $1`, m.path).Scan(data)
 	if err == sql.ErrNoRows {
-		fmt.Println("not found ", m.path)
 		return errorf(ErrNotFound, err, `metadata not found %s`, m.path)
 	}
 	return err
