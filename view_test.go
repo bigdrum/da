@@ -3,10 +3,7 @@ package da_test
 import (
 	"context"
 	"encoding/json"
-	"reflect"
 	"testing"
-
-	"fmt"
 
 	"time"
 
@@ -152,24 +149,20 @@ func TestQuery(t *testing.T) {
 				Value: json.RawMessage(value),
 			})
 		},
-		Reducer: func(entries []da.ViewResultRow, rereduce bool) (json.RawMessage, error) {
+		Reducer: func(keys []da.ViewReduceKey, values []interface{}, rereduce bool) (interface{}, error) {
 			if rereduce {
 				panic("not supported yet")
 			} else {
 				ret := 0
-				for _, e := range entries {
+				for _, value := range values {
 					var v int
-					if err := json.Unmarshal(e.Value, &v); err != nil {
+					if err := json.Unmarshal(value.(json.RawMessage), &v); err != nil {
 						return nil, err
 					}
 					ret += v
 				}
-				value, err := json.Marshal(ret)
-				if err != nil {
-					return nil, err
-				}
 
-				return json.RawMessage(value), nil
+				return ret, nil
 			}
 		},
 	})
@@ -491,48 +484,4 @@ func TestQuery(t *testing.T) {
     ]
 }
 `)
-}
-
-func printJSON(i interface{}) {
-	bs, err := json.MarshalIndent(i, "", "    ")
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println(string(bs))
-}
-
-func equalJSONText(t *testing.T, actual interface{}, expected string) {
-	var e interface{}
-	err := json.Unmarshal([]byte(expected), &e)
-	if err != nil {
-		t.Error(err)
-	}
-
-	a, err := json.Marshal(actual)
-	if err != nil {
-		t.Error(err)
-	}
-	b, err := json.Marshal(e)
-	if err != nil {
-		t.Error(err)
-	}
-
-	var o1 interface{}
-	var o2 interface{}
-
-	err = json.Unmarshal(a, &o1)
-	if err != nil {
-		t.Error(err)
-	}
-	err = json.Unmarshal(b, &o2)
-	if err != nil {
-		t.Error(err)
-	}
-
-	if !reflect.DeepEqual(o1, o2) {
-		t.Error(fmt.Errorf(`JSON mismatch: 
-%s
-%s
-`, string(a), string(b)))
-	}
 }

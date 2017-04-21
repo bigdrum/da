@@ -6,10 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"time"
 )
-
-var refreshTimeout = 30 * time.Second
 
 // View provides a way to transform the underlying data.
 type View struct {
@@ -24,10 +21,11 @@ type ViewConfig struct {
 	Name    string
 	Version string
 
-	// REVIEW: change this to ViewInput instead of []ViewInput? Since CouchDB views cannot query accross databases?
-	Input   ViewInput
-	Mapper  func(doc *Document, emit func(ve *ViewEntry) error) error
-	Reducer func(entries []ViewResultRow, rereduce bool) (json.RawMessage, error)
+	// TODO: Use []Input to support multi-table mapreduce
+	Input  ViewInput
+	Mapper func(doc *Document, emit func(ve *ViewEntry) error) error
+	// TODO: support multiple keys.
+	Reducer func(keys []ViewReduceKey, values []interface{}, rereduce bool) (interface{}, error)
 }
 
 // ViewInput specifies a view input.
@@ -41,13 +39,12 @@ type ViewEntry struct {
 	Value json.RawMessage
 }
 
-// TODO: might be useful to use list of this struct as parameter of Reducer when map result are splited.
-// // ViewReduceEntry represents a single entry of the view reducer input.
-// type ViewReduceEntry struct {
-// 	Key      string
-// 	DocID    string
-// 	Value    interface{}
-// }
+// ViewReduceKey represents element of the keys parameter of reducer.
+// http://docs.couchdb.org/en/latest/couchapp/ddocs.html#reduce-and-rereduce-functions
+type ViewReduceKey struct {
+	Key   string
+	DocID string
+}
 
 // ViewResult represents the result of view query.
 type ViewResult struct {
@@ -160,10 +157,6 @@ func (v *View) Refresh(ctx context.Context) error {
 		err = v.config.Mapper(doc, func(ve *ViewEntry) error {
 			var value interface{}
 			value = ve.Value
-			// key, err := json.Marshal(ve.Key)
-			// if err != nil {
-			// 	return err
-			// }
 
 			_, emitError = v.sqldb.ExecContext(ctx,
 				`INSERT INTO `+v.mapperTable+` (key, value, doc_id, doc_seq) VALUES ($1, $2, $3, $4)
@@ -266,6 +259,8 @@ func (v *View) queryMap(ctx context.Context, p ViewQueryParam) (ViewResult, erro
 	if err != nil {
 		return ret, err
 	}
+	defer rows.Close()
+
 	for rows.Next() {
 		r := ViewResultRow{}
 		if err := rows.Scan(&r.Key, &r.ID, &r.Value); err != nil {
@@ -273,6 +268,7 @@ func (v *View) queryMap(ctx context.Context, p ViewQueryParam) (ViewResult, erro
 		}
 		ret.Rows = append(ret.Rows, r)
 	}
+	rows.Close()
 
 	r := v.sqldb.QueryRowContext(ctx, `SELECT count(*) FROM `+v.mapperTable+` WHERE deleted != TRUE`)
 	if err := r.Scan(&ret.TotalRows); err != nil {
@@ -314,6 +310,7 @@ func (v *View) Query(ctx context.Context, p ViewQueryParam) (ViewResult, error) 
 		for i := range r.Rows {
 			if p.IncludeDocs {
 				r.Rows[i].Doc = &Document{}
+				// TODO: perform batch fetch here.
 				err = v.config.Input.Table.Get(ctx, r.Rows[i].ID, r.Rows[i].Doc)
 				if err != nil {
 					return r, err
@@ -323,13 +320,25 @@ func (v *View) Query(ctx context.Context, p ViewQueryParam) (ViewResult, error) 
 		return r, nil
 	}
 
-	value, err := v.config.Reducer(r.Rows, false)
+	keys := make([]ViewReduceKey, len(r.Rows))
+	values := make([]interface{}, len(r.Rows))
+	for i := range r.Rows {
+		keys[i] = ViewReduceKey{Key: r.Rows[i].Key, DocID: r.Rows[i].ID}
+		values[i] = r.Rows[i].Value
+	}
+
+	value, err := v.config.Reducer(keys, values, false)
+	if err != nil {
+		return r, err
+	}
+
+	valueMsg, err := json.Marshal(value)
 	if err != nil {
 		return r, err
 	}
 	r.Rows = []ViewResultRow{ViewResultRow{
 		Key:   p.Key,
-		Value: value,
+		Value: valueMsg,
 	}}
 
 	if p.Stale == "update_after" {
@@ -342,9 +351,8 @@ func (v *View) Query(ctx context.Context, p ViewQueryParam) (ViewResult, error) 
 // goRefresh calls Refresh in a new goroutine.
 func (v *View) goRefresh(ctx context.Context) {
 	go func() {
-		newCtx, cancel := context.WithTimeout(ctx, refreshTimeout)
-		defer cancel()
-		err := v.Refresh(newCtx)
+		// TODO: avoid multiple ongoing refresh.
+		err := v.Refresh(ctx)
 		if err != nil {
 			log.Printf("unable to refresh, error: %v", err)
 		}
