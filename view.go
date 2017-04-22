@@ -35,14 +35,14 @@ type ViewInput struct {
 
 // ViewEntry represents a single entry of the view mapper output.
 type ViewEntry struct {
-	Key   string
+	Key   interface{}
 	Value json.RawMessage
 }
 
 // ViewReduceKey represents element of the keys parameter of reducer.
 // http://docs.couchdb.org/en/latest/couchapp/ddocs.html#reduce-and-rereduce-functions
 type ViewReduceKey struct {
-	Key   string
+	Key   interface{}
 	DocID string
 }
 
@@ -56,7 +56,7 @@ type ViewResult struct {
 
 // ViewResultRow represents the row of the result of view query.
 type ViewResultRow struct {
-	Key   string          `json:"key,omitempty"`
+	Key   interface{}     `json:"key,omitempty"`
 	ID    string          `json:"id,omitempty"`
 	Value json.RawMessage `json:"value,omitempty"`
 	Doc   *Document       `json:"doc,omitempty"`
@@ -165,7 +165,7 @@ func (v *View) Refresh(ctx context.Context) error {
 					value=excluded.value,
 					doc_seq=excluded.doc_seq,
 					deleted=false;`,
-				ve.Key, value, doc.ID, doc.Seq)
+				ve.Key.(string), value, doc.ID, doc.Seq)
 			return emitError
 		})
 		if emitError != nil {
@@ -337,7 +337,6 @@ func (v *View) Query(ctx context.Context, p ViewQueryParam) (ViewResult, error) 
 		return r, err
 	}
 	r.Rows = []ViewResultRow{ViewResultRow{
-		Key:   p.Key,
 		Value: valueMsg,
 	}}
 

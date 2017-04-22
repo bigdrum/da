@@ -60,8 +60,7 @@ func TestMain(m *testing.M) {
 			if err != nil {
 				return err
 			}
-			err = sqlDB.Ping()
-			return err
+			return sqlDB.Ping()
 		}); err != nil {
 			log.Fatalf("Could not connect to docker: %s", err)
 		}
