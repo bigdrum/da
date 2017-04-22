@@ -254,7 +254,7 @@ func TestQuery(t *testing.T) {
 }
 `)
 
-	r, err = view.Query(ctx, da.ViewQueryParam{Keys: []string{"hello world", "hello world2"}, NoReduce: true})
+	r, err = view.Query(ctx, da.ViewQueryParam{Keys: []interface{}{"hello world", "hello world2"}, NoReduce: true})
 	if err != nil {
 		t.Fatal(err)
 	}

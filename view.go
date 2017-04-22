@@ -64,10 +64,10 @@ type ViewResultRow struct {
 
 // ViewQueryParam represents the query parameters.
 type ViewQueryParam struct {
-	Key           string
-	Keys          []string
-	StartKey      string
-	EndKey        string
+	Key           interface{}
+	Keys          []interface{}
+	StartKey      interface{}
+	EndKey        interface{}
 	StartKeyDocID string
 	EndKeyDocID   string
 	Limit         int
@@ -225,7 +225,7 @@ func (v *View) queryMap(ctx context.Context, p ViewQueryParam) (ViewResult, erro
 	}
 
 	ret := ViewResult{}
-	if p.Key != "" && len(p.Keys) > 0 {
+	if !isZero(p.Key) && len(p.Keys) > 0 {
 		return ret, fmt.Errorf("cannot supply both key and keys parameter key: %s keys: %v", p.Key, p.Keys)
 	}
 
