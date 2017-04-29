@@ -6,14 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+
+	"github.com/mitchellh/hashstructure"
 )
 
 // View provides a way to transform the underlying data.
 type View struct {
-	sqldb       *sql.DB
-	config      ViewConfig
-	mapperTable string
-	metaStore   *metaStore
+	sqldb        *sql.DB
+	config       ViewConfig
+	mapperTable  string
+	reducerTable string
+	metaStore    *metaStore
 }
 
 // ViewConfig specifies the view.
@@ -71,7 +74,7 @@ type ViewQueryParam struct {
 	StartKeyDocID string
 	EndKeyDocID   string
 	Limit         int
-	Stale         string
+	Stale         string `hash:"-"`
 	Descending    bool
 	Skip          int64
 	// TODO: Group and GroupLevel are stated in the CouchDB api but not yet implemented.
@@ -79,9 +82,9 @@ type ViewQueryParam struct {
 	// Group         bool
 	// GroupLevel    int
 	NoReduce     bool // was reduce(default true) in CouchDB api.
-	IncludeDocs  bool
+	IncludeDocs  bool `hash:"-"`
 	ExclusiveEnd bool // was inclusive_end(default true) in CouchDB api.
-	UpdateSeq    bool
+	UpdateSeq    bool `hash:"-"`
 }
 
 func (input *ViewInput) changes(ctx context.Context, minSeq int64, action func(doc *Document) error) error {
@@ -105,8 +108,8 @@ func (db *DB) View(ctx context.Context, config ViewConfig) (*View, error) {
 		return nil, fmt.Errorf("mapper is not set for view")
 	}
 
-	dataTable := "da_view_" + config.Name + "_" + config.Version
-	if err := checkName(dataTable); err != nil {
+	mapTable := "da_view_map_" + config.Name + "_" + config.Version
+	if err := checkName(mapTable); err != nil {
 		return nil, err
 	}
 	_, err := db.sqlDB.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
@@ -117,26 +120,46 @@ func (db *DB) View(ctx context.Context, config ViewConfig) (*View, error) {
 		doc_seq   BIGINT,
 		deleted   BOOL DEFAULT FALSE,
 		PRIMARY KEY(seq),
-		UNIQUE(doc_id))`, dataTable))
+		UNIQUE(doc_id))`, mapTable))
 	if err != nil {
 		return nil, err
 	}
 
+	var reduceTable string
+	if config.Reducer != nil {
+		reduceTable = "da_view_reduce_" + config.Name + "_" + config.Version
+		if err := checkName(reduceTable); err != nil {
+			return nil, err
+		}
+		_, err := db.sqlDB.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+			seq       BIGSERIAL,
+			param     TEXT,
+			value     JSONB,
+			map_seq   BIGINT,
+			total_rows BIGINT,
+			PRIMARY KEY(seq),
+			UNIQUE(param, map_seq))`, reduceTable))
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &View{
-		sqldb:       db.sqlDB,
-		config:      config,
-		mapperTable: dataTable,
-		metaStore:   db.metaStore.At("view").At(config.Name),
+		sqldb:        db.sqlDB,
+		config:       config,
+		mapperTable:  mapTable,
+		reducerTable: reduceTable,
+		metaStore:    db.metaStore.At("view").At(config.Name),
 	}, nil
 }
 
-// Refresh ensure the view is up-to-date.
-func (v *View) Refresh(ctx context.Context) error {
+// Refresh ensure the view is up-to-date. It returns last seq and error.
+func (v *View) Refresh(ctx context.Context, p ViewQueryParam) (int64, error) {
 	seqStore := v.metaStore.At(v.config.Input.Table.name).At("last_seq")
 	var lastSeq int64
 	err := seqStore.Get(ctx, &lastSeq)
 	if err != nil && !IsError(err, ErrNotFound) {
-		return err
+		return 0, err
 	}
 
 	seq := lastSeq
@@ -177,14 +200,65 @@ func (v *View) Refresh(ctx context.Context) error {
 		return nil
 	})
 	if err != nil {
+		return 0, err
+	}
+
+	if seq != lastSeq {
+		err = seqStore.Set(ctx, seq)
+		if err != nil {
+			return 0, err
+		}
+	}
+	err = v.refreshReduceTable(ctx, p, seq)
+	if err != nil {
+		return 0, err
+	}
+	return seq, nil
+}
+
+func (v *View) refreshReduceTable(ctx context.Context, p ViewQueryParam, seq int64) error {
+	if v.config.Reducer == nil {
+		return nil
+	}
+	if p.NoReduce {
+		return nil
+	}
+
+	r, err := v.queryMap(ctx, p)
+	if err != nil {
 		return err
 	}
-	return seqStore.Set(ctx, seq)
+
+	keys := make([]ViewReduceKey, len(r.Rows))
+	values := make([]interface{}, len(r.Rows))
+	for i := range r.Rows {
+		keys[i] = ViewReduceKey{Key: r.Rows[i].Key, DocID: r.Rows[i].ID}
+		values[i] = r.Rows[i].Value
+	}
+
+	value, err := v.config.Reducer(keys, values, false)
+	if err != nil {
+		return err
+	}
+
+	valueMsg, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+
+	hInt, err := hashstructure.Hash(p, nil)
+	hash := fmt.Sprintf("%d", hInt)
+
+	_, err = v.sqldb.ExecContext(ctx, `INSERT INTO `+v.reducerTable+` (param, value, map_seq, total_rows) VALUES ($1, $2, $3, $4)
+				ON CONFLICT (param, map_seq) DO UPDATE SET
+								value=excluded.value,
+								total_rows=excluded.total_rows;`, hash, json.RawMessage(valueMsg), seq, r.TotalRows)
+	return err
 }
 
 // Read reads a value of given key.
 func (v *View) Read(ctx context.Context, key string, each func(entry *ViewEntry) error) error {
-	if err := v.Refresh(ctx); err != nil {
+	if _, err := v.Refresh(ctx, ViewQueryParam{NoReduce: true}); err != nil {
 		return err
 	}
 
@@ -283,30 +357,28 @@ func (v *View) queryMap(ctx context.Context, p ViewQueryParam) (ViewResult, erro
 func (v *View) Query(ctx context.Context, p ViewQueryParam) (ViewResult, error) {
 	r := ViewResult{}
 	var err error
+	var lastSeq int64
 
 	if p.Stale != "ok" && p.Stale != "update_after" {
-		err = v.Refresh(ctx)
+		lastSeq, err = v.Refresh(ctx, p)
 		if err != nil {
 			return r, err
 		}
 	}
 
-	r, err = v.queryMap(ctx, p)
-	if err != nil {
-		return r, err
-	}
-
-	if p.UpdateSeq {
+	if lastSeq == 0 {
 		seqStore := v.metaStore.At(v.config.Input.Table.name).At("last_seq")
-		var lastSeq int64
 		err := seqStore.Get(ctx, &lastSeq)
 		if err != nil && !IsError(err, ErrNotFound) {
 			return r, err
 		}
-		r.UpdateSeq = lastSeq
 	}
 
 	if p.NoReduce || v.config.Reducer == nil {
+		r, err = v.queryMap(ctx, p)
+		if err != nil {
+			return r, err
+		}
 		for i := range r.Rows {
 			if p.IncludeDocs {
 				r.Rows[i].Doc = &Document{}
@@ -317,41 +389,40 @@ func (v *View) Query(ctx context.Context, p ViewQueryParam) (ViewResult, error) 
 				}
 			}
 		}
+		if p.UpdateSeq {
+			r.UpdateSeq = lastSeq
+		}
 		return r, nil
 	}
 
-	keys := make([]ViewReduceKey, len(r.Rows))
-	values := make([]interface{}, len(r.Rows))
-	for i := range r.Rows {
-		keys[i] = ViewReduceKey{Key: r.Rows[i].Key, DocID: r.Rows[i].ID}
-		values[i] = r.Rows[i].Value
-	}
+	hInt, err := hashstructure.Hash(p, nil)
+	hash := fmt.Sprintf("%d", hInt)
 
-	value, err := v.config.Reducer(keys, values, false)
+	var valueMsg []byte
+	row := v.sqldb.QueryRowContext(ctx, `SELECT value, total_rows FROM `+v.reducerTable+` WHERE map_seq = $1 AND param = $2`, lastSeq, hash)
+	err = row.Scan(&valueMsg, &r.TotalRows)
 	if err != nil {
 		return r, err
 	}
 
-	valueMsg, err := json.Marshal(value)
-	if err != nil {
-		return r, err
-	}
 	r.Rows = []ViewResultRow{ViewResultRow{
 		Value: valueMsg,
 	}}
 
 	if p.Stale == "update_after" {
-		v.goRefresh(ctx)
+		v.goRefresh(ctx, p)
 	}
-
+	if p.UpdateSeq {
+		r.UpdateSeq = lastSeq
+	}
 	return r, nil
 }
 
 // goRefresh calls Refresh in a new goroutine.
-func (v *View) goRefresh(ctx context.Context) {
+func (v *View) goRefresh(ctx context.Context, p ViewQueryParam) {
 	go func() {
 		// TODO: avoid multiple ongoing refresh.
-		err := v.Refresh(ctx)
+		_, err := v.Refresh(ctx, p)
 		if err != nil {
 			log.Printf("unable to refresh, error: %v", err)
 		}
