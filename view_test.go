@@ -56,8 +56,12 @@ func TestView(t *testing.T) {
 			if err := json.Unmarshal(doc.Data, &d); err != nil {
 				return err
 			}
+			key, err := json.Marshal(d["title"].(string))
+			if err != nil {
+				return err
+			}
 			return emit(&da.ViewEntry{
-				Key:   d["title"].(string),
+				Key:   json.RawMessage(key),
 				Value: json.RawMessage(`"value"`),
 			})
 		},
@@ -144,14 +148,22 @@ func TestQuery(t *testing.T) {
 			if err != nil {
 				return err
 			}
+			key, err := json.Marshal(d["title"].(string))
+			if err != nil {
+				return err
+			}
 			return emit(&da.ViewEntry{
-				Key:   d["title"].(string),
+				Key:   json.RawMessage(key),
 				Value: json.RawMessage(value),
 			})
 		},
 		Reducer: func(keys []da.ViewReduceKey, values []interface{}, rereduce bool) (interface{}, error) {
 			if rereduce {
-				panic("not supported yet")
+				ret := 0
+				for _, v := range values {
+					ret += v.(int)
+				}
+				return ret, nil
 			} else {
 				ret := 0
 				for _, value := range values {

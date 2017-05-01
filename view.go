@@ -35,7 +35,7 @@ type ViewInput struct {
 
 // ViewEntry represents a single entry of the view mapper output.
 type ViewEntry struct {
-	Key   interface{}
+	Key   json.RawMessage
 	Value json.RawMessage
 }
 
@@ -153,26 +153,28 @@ func (v *View) Refresh(ctx context.Context) error {
 			return nil
 		}
 
-		var emitError error
 		err = v.config.Mapper(doc, func(ve *ViewEntry) error {
 			var value interface{}
 			value = ve.Value
 
-			_, emitError = v.sqldb.ExecContext(ctx,
+			var key string
+			err = json.Unmarshal(ve.Key, &key)
+			if err != nil {
+				return err
+			}
+
+			_, err := v.sqldb.ExecContext(ctx,
 				`INSERT INTO `+v.mapperTable+` (key, value, doc_id, doc_seq) VALUES ($1, $2, $3, $4)
 					ON CONFLICT (doc_id) DO UPDATE SET
 					key=excluded.key,
 					value=excluded.value,
 					doc_seq=excluded.doc_seq,
 					deleted=false;`,
-				ve.Key.(string), value, doc.ID, doc.Seq)
-			return emitError
-		})
-		if emitError != nil {
-			return fmt.Errorf("emit error: %v", emitError)
-		}
-		if err != nil {
+				key, value, doc.ID, doc.Seq)
 			return err
+		})
+		if err != nil {
+			return fmt.Errorf("emit error: %v", err)
 		}
 		return nil
 	})
@@ -320,14 +322,44 @@ func (v *View) Query(ctx context.Context, p ViewQueryParam) (ViewResult, error) 
 		return r, nil
 	}
 
-	keys := make([]ViewReduceKey, len(r.Rows))
-	values := make([]interface{}, len(r.Rows))
-	for i := range r.Rows {
-		keys[i] = ViewReduceKey{Key: r.Rows[i].Key, DocID: r.Rows[i].ID}
-		values[i] = r.Rows[i].Value
+	if len(r.Rows) == 0 {
+		return r, nil
 	}
 
-	value, err := v.config.Reducer(keys, values, false)
+	// Group keys. r.Rows is sorted by key.
+	type KV struct {
+		k []ViewReduceKey
+		v []interface{}
+	}
+	groupedKV := []KV{}
+	tmpKey := r.Rows[0].Key
+	tmpKeys := []ViewReduceKey{}
+	tmpVals := []interface{}{}
+	for _, r := range r.Rows {
+		key := ViewReduceKey{Key: r.Key, DocID: r.ID}
+		if r.Key == tmpKey {
+			tmpKeys = append(tmpKeys, key)
+			tmpVals = append(tmpVals, r.Value)
+		} else {
+			groupedKV = append(groupedKV, KV{k: tmpKeys, v: tmpVals})
+			tmpKeys = []ViewReduceKey{key}
+			tmpVals = []interface{}{r.Value}
+			tmpKey = r.Key
+		}
+	}
+	if len(tmpKeys) > 0 {
+		groupedKV = append(groupedKV, KV{k: tmpKeys, v: tmpVals})
+	}
+
+	vs := []interface{}{}
+	for _, kv := range groupedKV {
+		value, err := v.config.Reducer(kv.k, kv.v, false)
+		if err != nil {
+			return r, err
+		}
+		vs = append(vs, value)
+	}
+	value, err := v.config.Reducer(nil, vs, true)
 	if err != nil {
 		return r, err
 	}
