@@ -2,11 +2,13 @@ package da_test
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/url"
 	"os"
+	"reflect"
 	"testing"
 
 	_ "github.com/lib/pq"
@@ -58,11 +60,7 @@ func TestMain(m *testing.M) {
 			if err != nil {
 				return err
 			}
-			err = sqlDB.Ping()
-			if err != nil {
-				return err
-			}
-			return nil
+			return sqlDB.Ping()
 		}); err != nil {
 			log.Fatalf("Could not connect to docker: %s", err)
 		}
@@ -71,4 +69,38 @@ func TestMain(m *testing.M) {
 		return m.Run()
 	}()
 	os.Exit(code)
+}
+
+func printJSON(i interface{}) {
+	bs, err := json.MarshalIndent(i, "", "    ")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(bs))
+}
+
+func equalJSONText(t *testing.T, actual interface{}, expected string) {
+	a, err := json.Marshal(actual)
+	if err != nil {
+		t.Error(err)
+	}
+
+	var o1 interface{}
+	var o2 interface{}
+
+	err = json.Unmarshal(a, &o1)
+	if err != nil {
+		t.Error(err)
+	}
+	err = json.Unmarshal([]byte(expected), &o2)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if !reflect.DeepEqual(o1, o2) {
+		t.Error(fmt.Errorf(`JSON mismatch: 
+%s
+%s
+`, string(a), expected))
+	}
 }
