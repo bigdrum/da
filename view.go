@@ -38,7 +38,7 @@ type ViewInput struct {
 
 // ViewEntry represents a single entry of the view mapper output.
 type ViewEntry struct {
-	Key   interface{}
+	Key   json.RawMessage
 	Value json.RawMessage
 }
 
@@ -181,14 +181,20 @@ func (v *View) Refresh(ctx context.Context, p ViewQueryParam) (int64, error) {
 			var value interface{}
 			value = ve.Value
 
-			_, emitError = v.sqldb.ExecContext(ctx,
+			var key string
+			emitError = json.Unmarshal(ve.Key, &key)
+			if emitError != nil {
+				return emitError
+			}
+
+			_, emitError := v.sqldb.ExecContext(ctx,
 				`INSERT INTO `+v.mapperTable+` (key, value, doc_id, doc_seq) VALUES ($1, $2, $3, $4)
 					ON CONFLICT (doc_id) DO UPDATE SET
 					key=excluded.key,
 					value=excluded.value,
 					doc_seq=excluded.doc_seq,
 					deleted=false;`,
-				ve.Key.(string), value, doc.ID, doc.Seq)
+				key, value, doc.ID, doc.Seq)
 			return emitError
 		})
 		if emitError != nil {
@@ -229,19 +235,50 @@ func (v *View) refreshReduceTable(ctx context.Context, p ViewQueryParam, seq int
 		return err
 	}
 
-	keys := make([]ViewReduceKey, len(r.Rows))
-	values := make([]interface{}, len(r.Rows))
-	for i := range r.Rows {
-		keys[i] = ViewReduceKey{Key: r.Rows[i].Key, DocID: r.Rows[i].ID}
-		values[i] = r.Rows[i].Value
-	}
+	valueMsg, err := func() ([]byte, error) {
+		if len(r.Rows) == 0 {
+			return nil, nil
+		}
+		// Group keys. r.Rows is sorted by key.
+		type KV struct {
+			k []ViewReduceKey
+			v []interface{}
+		}
+		groupedKV := []KV{}
+		tmpKey := r.Rows[0].Key
+		tmpKeys := []ViewReduceKey{}
+		tmpVals := []interface{}{}
+		for _, r := range r.Rows {
+			key := ViewReduceKey{Key: r.Key, DocID: r.ID}
+			if r.Key == tmpKey {
+				tmpKeys = append(tmpKeys, key)
+				tmpVals = append(tmpVals, r.Value)
+			} else {
+				groupedKV = append(groupedKV, KV{k: tmpKeys, v: tmpVals})
+				tmpKeys = []ViewReduceKey{key}
+				tmpVals = []interface{}{r.Value}
+				tmpKey = r.Key
+			}
+		}
+		if len(tmpKeys) > 0 {
+			groupedKV = append(groupedKV, KV{k: tmpKeys, v: tmpVals})
+		}
 
-	value, err := v.config.Reducer(keys, values, false)
-	if err != nil {
-		return err
-	}
+		vs := []interface{}{}
+		for _, kv := range groupedKV {
+			value, err := v.config.Reducer(kv.k, kv.v, false)
+			if err != nil {
+				return nil, err
+			}
+			vs = append(vs, value)
+		}
+		value, err := v.config.Reducer(nil, vs, true)
+		if err != nil {
+			return nil, err
+		}
 
-	valueMsg, err := json.Marshal(value)
+		return json.Marshal(value)
+	}()
 	if err != nil {
 		return err
 	}
@@ -261,7 +298,6 @@ func (v *View) Read(ctx context.Context, key string, each func(entry *ViewEntry)
 	if _, err := v.Refresh(ctx, ViewQueryParam{NoReduce: true}); err != nil {
 		return err
 	}
-
 	rows, err := v.sqldb.QueryContext(
 		ctx, `SELECT value FROM `+v.mapperTable+` WHERE key = $1 AND deleted != TRUE;`, key)
 	if err != nil {
@@ -415,6 +451,7 @@ func (v *View) Query(ctx context.Context, p ViewQueryParam) (ViewResult, error) 
 	if p.UpdateSeq {
 		r.UpdateSeq = lastSeq
 	}
+
 	return r, nil
 }
 
