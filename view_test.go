@@ -9,7 +9,13 @@ import (
 	"github.com/bigdrum/da"
 )
 
-func viewOneRaw(ctx context.Context, t *testing.T, view *da.View, key string) *string {
+type strKey string
+
+func (s strKey) ComparableString() string {
+	return string(s)
+}
+
+func viewOneRaw(ctx context.Context, t *testing.T, view *da.View, key da.ViewKey) *string {
 	found := 0
 	value := ""
 	if err := view.Read(ctx, key, func(ve *da.ViewEntry) error {
@@ -49,18 +55,17 @@ func TestView(t *testing.T) {
 		Input: da.ViewInput{
 			Table: tbl,
 		},
+		LoadKey: func(key string) (da.ViewKey, error) {
+			return strKey(key), nil
+		},
 		Mapper: func(doc *da.Document, emit func(ve *da.ViewEntry) error) error {
 			mapperRuns++
 			d := map[string]interface{}{}
 			if err := json.Unmarshal(doc.Data, &d); err != nil {
 				return err
 			}
-			key, err := json.Marshal(d["title"].(string))
-			if err != nil {
-				return err
-			}
 			return emit(&da.ViewEntry{
-				Key:   json.RawMessage(key),
+				Key:   strKey(d["title"].(string)),
 				Value: json.RawMessage(`"value"`),
 			})
 		},
@@ -69,7 +74,7 @@ func TestView(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	viewKey := "hello world"
+	viewKey := strKey("hello world")
 	value := viewOneRaw(ctx, t, view, viewKey)
 	if *value != `"value"` {
 		t.Error(value)
@@ -94,7 +99,7 @@ func TestView(t *testing.T) {
 	if value != nil {
 		t.Error(*value)
 	}
-	value = viewOneRaw(ctx, t, view, "hello world 2")
+	value = viewOneRaw(ctx, t, view, strKey("hello world 2"))
 	if mapperRuns != 2 {
 		t.Error(mapperRuns)
 	}
@@ -139,6 +144,9 @@ func TestQuery(t *testing.T) {
 		Input: da.ViewInput{
 			Table: tbl,
 		},
+		LoadKey: func(key string) (da.ViewKey, error) {
+			return strKey(key), nil
+		},
 		Mapper: func(doc *da.Document, emit func(ve *da.ViewEntry) error) error {
 			// emit(title, len(tags))
 			d := map[string]interface{}{}
@@ -149,12 +157,8 @@ func TestQuery(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			key, err := json.Marshal(d["title"].(string))
-			if err != nil {
-				return err
-			}
 			return emit(&da.ViewEntry{
-				Key:   json.RawMessage(key),
+				Key:   strKey(d["title"].(string)),
 				Value: json.RawMessage(value),
 			})
 		},
@@ -258,7 +262,7 @@ func TestQuery(t *testing.T) {
 }
 `)
 
-	r, err = view.Query(ctx, da.ViewQueryParam{Key: "hello world", NoReduce: true})
+	r, err = view.Query(ctx, da.ViewQueryParam{Key: strKey("hello world"), NoReduce: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +278,7 @@ func TestQuery(t *testing.T) {
 }
 `)
 
-	r, err = view.Query(ctx, da.ViewQueryParam{Keys: []interface{}{"hello world", "hello world2"}, NoReduce: true})
+	r, err = view.Query(ctx, da.ViewQueryParam{Keys: []da.ViewKey{strKey("hello world"), strKey("hello world2")}, NoReduce: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +331,7 @@ func TestQuery(t *testing.T) {
 }
 `)
 
-	r, err = view.Query(ctx, da.ViewQueryParam{StartKey: "hello world2", NoReduce: true})
+	r, err = view.Query(ctx, da.ViewQueryParam{StartKey: strKey("hello world2"), NoReduce: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +347,7 @@ func TestQuery(t *testing.T) {
 }
 `)
 
-	r, err = view.Query(ctx, da.ViewQueryParam{EndKey: "hello world", NoReduce: true})
+	r, err = view.Query(ctx, da.ViewQueryParam{EndKey: strKey("hello world"), NoReduce: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +363,7 @@ func TestQuery(t *testing.T) {
 }
 `)
 
-	r, err = view.Query(ctx, da.ViewQueryParam{EndKey: "hello world", ExclusiveEnd: true, NoReduce: true})
+	r, err = view.Query(ctx, da.ViewQueryParam{EndKey: strKey("hello world"), ExclusiveEnd: true, NoReduce: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +372,7 @@ func TestQuery(t *testing.T) {
 }
 `)
 
-	r, err = view.Query(ctx, da.ViewQueryParam{EndKey: "hello world", Descending: true, NoReduce: true})
+	r, err = view.Query(ctx, da.ViewQueryParam{EndKey: strKey("hello world"), Descending: true, NoReduce: true})
 	if err != nil {
 		t.Fatal(err)
 	}

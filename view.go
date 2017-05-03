@@ -29,6 +29,7 @@ type ViewConfig struct {
 	Mapper func(doc *Document, emit func(ve *ViewEntry) error) error
 	// TODO: support multiple keys.
 	Reducer func(keys []ViewReduceKey, values []interface{}, rereduce bool) (interface{}, error)
+	LoadKey func(key string) (ViewKey, error)
 }
 
 // ViewInput specifies a view input.
@@ -36,16 +37,20 @@ type ViewInput struct {
 	Table *Table
 }
 
+// ViewKey is the interface implemented by types that can be used as a key in view.
+type ViewKey interface {
+	ComparableString() string
+}
+
 // ViewEntry represents a single entry of the view mapper output.
 type ViewEntry struct {
-	Key   json.RawMessage
+	Key   ViewKey
 	Value json.RawMessage
 }
 
 // ViewReduceKey represents element of the keys parameter of reducer.
-// http://docs.couchdb.org/en/latest/couchapp/ddocs.html#reduce-and-rereduce-functions
 type ViewReduceKey struct {
-	Key   interface{}
+	Key   ViewKey
 	DocID string
 }
 
@@ -59,7 +64,7 @@ type ViewResult struct {
 
 // ViewResultRow represents the row of the result of view query.
 type ViewResultRow struct {
-	Key   interface{}     `json:"key,omitempty"`
+	Key   ViewKey         `json:"key,omitempty"`
 	ID    string          `json:"id,omitempty"`
 	Value json.RawMessage `json:"value,omitempty"`
 	Doc   *Document       `json:"doc,omitempty"`
@@ -67,10 +72,10 @@ type ViewResultRow struct {
 
 // ViewQueryParam represents the query parameters.
 type ViewQueryParam struct {
-	Key           interface{}
-	Keys          []interface{}
-	StartKey      interface{}
-	EndKey        interface{}
+	Key           ViewKey
+	Keys          []ViewKey
+	StartKey      ViewKey
+	EndKey        ViewKey
 	StartKeyDocID string
 	EndKeyDocID   string
 	Limit         int
@@ -181,12 +186,6 @@ func (v *View) Refresh(ctx context.Context, p ViewQueryParam) (int64, error) {
 			var value interface{}
 			value = ve.Value
 
-			var key string
-			emitError = json.Unmarshal(ve.Key, &key)
-			if emitError != nil {
-				return emitError
-			}
-
 			_, emitError := v.sqldb.ExecContext(ctx,
 				`INSERT INTO `+v.mapperTable+` (key, value, doc_id, doc_seq) VALUES ($1, $2, $3, $4)
 					ON CONFLICT (doc_id) DO UPDATE SET
@@ -194,7 +193,7 @@ func (v *View) Refresh(ctx context.Context, p ViewQueryParam) (int64, error) {
 					value=excluded.value,
 					doc_seq=excluded.doc_seq,
 					deleted=false;`,
-				key, value, doc.ID, doc.Seq)
+				ve.Key.ComparableString(), value, doc.ID, doc.Seq)
 			return emitError
 		})
 		if emitError != nil {
@@ -294,12 +293,12 @@ func (v *View) refreshReduceTable(ctx context.Context, p ViewQueryParam, seq int
 }
 
 // Read reads a value of given key.
-func (v *View) Read(ctx context.Context, key string, each func(entry *ViewEntry) error) error {
+func (v *View) Read(ctx context.Context, key ViewKey, each func(entry *ViewEntry) error) error {
 	if _, err := v.Refresh(ctx, ViewQueryParam{NoReduce: true}); err != nil {
 		return err
 	}
 	rows, err := v.sqldb.QueryContext(
-		ctx, `SELECT value FROM `+v.mapperTable+` WHERE key = $1 AND deleted != TRUE;`, key)
+		ctx, `SELECT value FROM `+v.mapperTable+` WHERE key = $1 AND deleted != TRUE;`, key.ComparableString())
 	if err != nil {
 		return err
 	}
@@ -343,7 +342,7 @@ func (v *View) queryMap(ctx context.Context, p ViewQueryParam) (ViewResult, erro
 	qb.Add(`SELECT key, doc_id, value FROM ` + v.mapperTable + ` WHERE deleted != TRUE`)
 	qb.AddIfNotZero(` AND key = $1`, p.Key)
 	if len(p.Keys) > 0 {
-		if p.Keys[0] == "" {
+		if p.Keys[0] == nil || p.Keys[0].ComparableString() == "" {
 			return ret, fmt.Errorf("parameter keys[0] cannot be empty string")
 		}
 		qb.Add(` AND (key = $1`, p.Keys[0])
@@ -373,7 +372,12 @@ func (v *View) queryMap(ctx context.Context, p ViewQueryParam) (ViewResult, erro
 
 	for rows.Next() {
 		r := ViewResultRow{}
-		if err := rows.Scan(&r.Key, &r.ID, &r.Value); err != nil {
+		var key string
+		if err = rows.Scan(&key, &r.ID, &r.Value); err != nil {
+			return ret, err
+		}
+		r.Key, err = v.config.LoadKey(key)
+		if err != nil {
 			return ret, err
 		}
 		ret.Rows = append(ret.Rows, r)

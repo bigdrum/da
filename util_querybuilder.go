@@ -75,6 +75,13 @@ func (b *queryBuilder) AddIfNotZero(clause string, v interface{}) bool {
 	if isZero(v) {
 		return false
 	}
+	k, ok := v.(ViewKey)
+	if ok {
+		v = k.ComparableString()
+		if v.(string) == "" {
+			return false
+		}
+	}
 	b.Add(clause, v)
 	return true
 }
