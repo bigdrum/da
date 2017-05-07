@@ -161,7 +161,12 @@ func TestQuery(t *testing.T) {
 			if rereduce {
 				ret := 0
 				for _, v := range values {
-					ret += v.(int)
+					var i int
+					err := json.Unmarshal(v.(json.RawMessage), &i)
+					if err != nil {
+						return nil, err
+					}
+					ret += i
 				}
 				return ret, nil
 			} else {
@@ -208,7 +213,6 @@ func TestQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	equalJSONText(t, r, `{
-    "total_rows": 2,
     "rows": [
         {
             "value": 3
@@ -460,7 +464,6 @@ func TestQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	equalJSONText(t, r, `{
-    "total_rows": 2,
     "rows": [
         {
             "value": 3
@@ -473,7 +476,6 @@ func TestQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	equalJSONText(t, r, `{
-    "total_rows": 2,
     "rows": [
         {
             "value": 3
@@ -488,7 +490,6 @@ func TestQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	equalJSONText(t, r, `{
-    "total_rows": 2,
     "rows": [
         {
             "value": 2

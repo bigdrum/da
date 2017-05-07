@@ -10,10 +10,11 @@ import (
 
 // View provides a way to transform the underlying data.
 type View struct {
-	sqldb       *sql.DB
-	config      ViewConfig
-	mapperTable string
-	metaStore   *metaStore
+	sqldb        *sql.DB
+	config       ViewConfig
+	mapperTable  string
+	reducerTable string
+	metaStore    *metaStore
 }
 
 // ViewConfig specifies the view.
@@ -105,8 +106,8 @@ func (db *DB) View(ctx context.Context, config ViewConfig) (*View, error) {
 		return nil, fmt.Errorf("mapper is not set for view")
 	}
 
-	dataTable := "da_view_" + config.Name + "_" + config.Version
-	if err := checkName(dataTable); err != nil {
+	mapTable := "da_view_map_" + config.Name + "_" + config.Version
+	if err := checkName(mapTable); err != nil {
 		return nil, err
 	}
 	_, err := db.sqlDB.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
@@ -117,17 +118,45 @@ func (db *DB) View(ctx context.Context, config ViewConfig) (*View, error) {
 		doc_seq   BIGINT,
 		deleted   BOOL DEFAULT FALSE,
 		PRIMARY KEY(seq),
-		UNIQUE(doc_id))`, dataTable))
+		UNIQUE(doc_id))`, mapTable))
 	if err != nil {
 		return nil, err
 	}
 
-	return &View{
-		sqldb:       db.sqlDB,
-		config:      config,
-		mapperTable: dataTable,
-		metaStore:   db.metaStore.At("view").At(config.Name),
-	}, nil
+	var reduceTable string
+	if config.Reducer != nil {
+		reduceTable = "da_view_reduce_" + config.Name + "_" + config.Version
+		if err := checkName(reduceTable); err != nil {
+			return nil, err
+		}
+	}
+
+	ret := &View{
+		sqldb:        db.sqlDB,
+		config:       config,
+		mapperTable:  mapTable,
+		reducerTable: reduceTable,
+		metaStore:    db.metaStore.At("view").At(config.Name),
+	}
+	if ret.reducerTable != "" {
+		err = ret.createReduceTable(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return ret, nil
+}
+
+func (v *View) createReduceTable(ctx context.Context) error {
+	_, err := v.sqldb.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+		seq       BIGSERIAL,
+		key       TEXT,
+		value     JSONB,
+		deleted   BOOL DEFAULT FALSE,
+		PRIMARY KEY(seq),
+		UNIQUE(key))`, v.reducerTable))
+	return err
 }
 
 // Refresh ensure the view is up-to-date.
@@ -181,7 +210,81 @@ func (v *View) Refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return seqStore.Set(ctx, seq)
+	if seq == lastSeq {
+		return nil
+	}
+	err = seqStore.Set(ctx, seq)
+	if err != nil {
+		return err
+	}
+
+	if v.reducerTable == "" {
+		return nil
+	}
+
+	_, err = v.sqldb.ExecContext(ctx, `DROP TABLE `+v.reducerTable)
+	if err != nil {
+		return err
+	}
+	err = v.createReduceTable(ctx)
+	if err != nil {
+		return err
+	}
+
+	rs, err := v.sqldb.QueryContext(ctx, `SELECT key, doc_id, value FROM `+v.mapperTable+` WHERE deleted != TRUE ORDER BY key ASC, doc_id ASC`)
+	if err != nil {
+		return err
+	}
+	defer rs.Close()
+
+	tmpKey := ""
+	tmpKeys := []ViewReduceKey{}
+	tmpVals := []interface{}{}
+	singleReduceAndSave := func() error {
+		val, err := v.config.Reducer(tmpKeys, tmpVals, false)
+		if err != nil {
+			return fmt.Errorf("Reduce error: %v", err)
+		}
+		bs, err := json.Marshal(val)
+		if err != nil {
+			return err
+		}
+		_, err = v.sqldb.ExecContext(ctx, `INSERT INTO `+v.reducerTable+` (key, value) VALUES ($1, $2)`, tmpKey, bs)
+		return err
+	}
+	for rs.Next() {
+		var key, docID string
+		var value json.RawMessage
+
+		err := rs.Scan(&key, &docID, &value)
+		if err != nil {
+			return err
+		}
+		if tmpKey == "" {
+			tmpKey = key
+		}
+		vrk := ViewReduceKey{Key: key, DocID: docID}
+		if key == tmpKey {
+			tmpKeys = append(tmpKeys, vrk)
+			tmpVals = append(tmpVals, value)
+		} else {
+			err := singleReduceAndSave()
+			if err != nil {
+				return err
+			}
+			tmpKeys = []ViewReduceKey{vrk}
+			tmpVals = []interface{}{value}
+			tmpKey = key
+		}
+	}
+	rs.Close()
+	if len(tmpKeys) > 0 {
+		err := singleReduceAndSave()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Read reads a value of given key.
@@ -281,34 +384,107 @@ func (v *View) queryMap(ctx context.Context, p ViewQueryParam) (ViewResult, erro
 	return ret, nil
 }
 
+func (v *View) queryReduce(ctx context.Context, p ViewQueryParam) (ViewResult, error) {
+	ret := ViewResult{}
+	if p.StartKeyDocID != "" || p.EndKeyDocID != "" {
+		return ret, fmt.Errorf("DocID parameters not supported in reduce query")
+	}
+	if p.Limit != 0 || p.Skip != 0 {
+		return ret, fmt.Errorf("Skip and limit parameters not supported in reduce query")
+	}
+
+	var orderBy string
+	if p.Descending {
+		s := p.StartKey
+		p.StartKey = p.EndKey
+		p.EndKey = s
+		orderBy = "key DESC"
+	} else {
+		orderBy = "key ASC"
+	}
+
+	if !isZero(p.Key) && len(p.Keys) > 0 {
+		return ret, fmt.Errorf("cannot supply both key and keys parameter key: %s keys: %v", p.Key, p.Keys)
+	}
+
+	qb := newQueryBuilder()
+	qb.Add(`SELECT value FROM ` + v.reducerTable + ` WHERE deleted != TRUE`)
+	qb.AddIfNotZero(` AND key = $1`, p.Key)
+	if len(p.Keys) > 0 {
+		if p.Keys[0] == "" {
+			return ret, fmt.Errorf("parameter keys[0] cannot be empty string")
+		}
+		qb.Add(` AND (key = $1`, p.Keys[0])
+		for _, k := range p.Keys[1:] {
+			qb.AddIfNotZero(` OR key = $1`, k)
+		}
+		qb.Add(`)`)
+	}
+	qb.AddIfNotZero(` AND key >= $1`, p.StartKey)
+	eqSign := "="
+	if p.ExclusiveEnd {
+		eqSign = ""
+	}
+	qb.AddIfNotZero(` AND key <`+eqSign+` $1`, p.EndKey)
+	qb.Add(" ORDER BY " + orderBy)
+
+	rows, err := qb.Query(ctx, v.sqldb)
+	if err != nil {
+		return ret, err
+	}
+	defer rows.Close()
+
+	var vs []interface{}
+	for rows.Next() {
+		var v json.RawMessage
+		if err := rows.Scan(&v); err != nil {
+			return ret, err
+		}
+		vs = append(vs, v)
+	}
+	rows.Close()
+
+	value, err := v.config.Reducer(nil, vs, true)
+	if err != nil {
+		return ret, fmt.Errorf("Re-reduce error: %v", err)
+	}
+	msg, err := json.Marshal(value)
+	if err != nil {
+		return ret, err
+	}
+	ret.Rows = []ViewResultRow{ViewResultRow{Value: msg}}
+	return ret, nil
+}
+
 // Query queries the view.
 func (v *View) Query(ctx context.Context, p ViewQueryParam) (ViewResult, error) {
-	r := ViewResult{}
+	var r ViewResult
 	var err error
 
 	if p.Stale != "ok" && p.Stale != "update_after" {
-		err = v.Refresh(ctx)
+		err := v.Refresh(ctx)
 		if err != nil {
 			return r, err
 		}
 	}
-
-	r, err = v.queryMap(ctx, p)
-	if err != nil {
-		return r, err
+	if p.Stale == "update_after" {
+		v.goRefresh(ctx)
 	}
 
+	var lastSeq int64
 	if p.UpdateSeq {
 		seqStore := v.metaStore.At(v.config.Input.Table.name).At("last_seq")
-		var lastSeq int64
 		err := seqStore.Get(ctx, &lastSeq)
 		if err != nil && !IsError(err, ErrNotFound) {
 			return r, err
 		}
-		r.UpdateSeq = lastSeq
 	}
 
 	if p.NoReduce || v.config.Reducer == nil {
+		r, err = v.queryMap(ctx, p)
+		if err != nil {
+			return r, err
+		}
 		for i := range r.Rows {
 			if p.IncludeDocs {
 				r.Rows[i].Doc = &Document{}
@@ -319,62 +495,15 @@ func (v *View) Query(ctx context.Context, p ViewQueryParam) (ViewResult, error) 
 				}
 			}
 		}
+		r.UpdateSeq = lastSeq
 		return r, nil
 	}
 
-	if len(r.Rows) == 0 {
-		return r, nil
-	}
-
-	// Group keys. r.Rows is sorted by key.
-	type KV struct {
-		k []ViewReduceKey
-		v []interface{}
-	}
-	groupedKV := []KV{}
-	tmpKey := r.Rows[0].Key
-	tmpKeys := []ViewReduceKey{}
-	tmpVals := []interface{}{}
-	for _, r := range r.Rows {
-		key := ViewReduceKey{Key: r.Key, DocID: r.ID}
-		if r.Key == tmpKey {
-			tmpKeys = append(tmpKeys, key)
-			tmpVals = append(tmpVals, r.Value)
-		} else {
-			groupedKV = append(groupedKV, KV{k: tmpKeys, v: tmpVals})
-			tmpKeys = []ViewReduceKey{key}
-			tmpVals = []interface{}{r.Value}
-			tmpKey = r.Key
-		}
-	}
-	if len(tmpKeys) > 0 {
-		groupedKV = append(groupedKV, KV{k: tmpKeys, v: tmpVals})
-	}
-
-	vs := []interface{}{}
-	for _, kv := range groupedKV {
-		value, err := v.config.Reducer(kv.k, kv.v, false)
-		if err != nil {
-			return r, err
-		}
-		vs = append(vs, value)
-	}
-	value, err := v.config.Reducer(nil, vs, true)
+	r, err = v.queryReduce(ctx, p)
 	if err != nil {
 		return r, err
 	}
-
-	valueMsg, err := json.Marshal(value)
-	if err != nil {
-		return r, err
-	}
-	r.Rows = []ViewResultRow{ViewResultRow{
-		Value: valueMsg,
-	}}
-
-	if p.Stale == "update_after" {
-		v.goRefresh(ctx)
-	}
+	r.UpdateSeq = lastSeq
 
 	return r, nil
 }
