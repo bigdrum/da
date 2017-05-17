@@ -162,13 +162,19 @@ func (v *View) Refresh(ctx context.Context) error {
 	}
 
 	seq := lastSeq
-	changedKeys := make(map[string]bool)
+	var changedDocID []string
 	err = v.config.Input.changes(ctx, lastSeq+1, func(doc *Document) error {
+		var err error
+		defer func() {
+			if err == nil {
+				changedDocID = append(changedDocID, doc.ID)
+			}
+		}()
 		seq = doc.Seq
 
 		// TODO: Need a transaction here.
 		// TODO: The ops can be batched.
-		_, err := v.sqldb.ExecContext(ctx, `UPDATE `+v.mapperTable+` SET deleted = TRUE WHERE doc_id = $1`, doc.ID)
+		_, err = v.sqldb.ExecContext(ctx, `UPDATE `+v.mapperTable+` SET deleted = TRUE WHERE doc_id = $1`, doc.ID)
 		if err != nil {
 			return err
 		}
@@ -187,19 +193,15 @@ func (v *View) Refresh(ctx context.Context) error {
 				return emitErr
 			}
 
-			_, emitErr := v.sqldb.ExecContext(ctx,
+			_, emitErr = v.sqldb.ExecContext(ctx,
 				`INSERT INTO `+v.mapperTable+` (key, value, doc_id, doc_seq) VALUES ($1, $2, $3, $4)
 					ON CONFLICT (doc_id) DO UPDATE SET
 					key=excluded.key,
 					value=excluded.value,
 					doc_seq=excluded.doc_seq,
-					deleted=false;`,
+					deleted=FALSE;`,
 				key, value, doc.ID, doc.Seq)
-			if emitErr != nil {
-				return emitErr
-			}
-			changedKeys[key] = true
-			return nil
+			return emitErr
 		})
 		if emitErr != nil {
 			return fmt.Errorf("emit error: %v", emitErr)
@@ -220,21 +222,52 @@ func (v *View) Refresh(ctx context.Context) error {
 		return err
 	}
 
-	if len(changedKeys) == 0 {
+	if len(changedDocID) == 0 {
 		return nil
 	}
 	if v.reducerTable == "" {
 		return nil
 	}
 
+	changedKeys, err := func() ([]string, error) {
+		qb := newQueryBuilder()
+		qb.Add(`SELECT DISTINCT key FROM ` + v.mapperTable + ` WHERE doc_id IN(`)
+		for i, id := range changedDocID {
+			if i == 0 {
+				qb.Add(`$1`, id)
+			} else {
+				qb.Add(", $1", id)
+			}
+		}
+		qb.Add(")")
+		rs, err := qb.Query(ctx, v.sqldb)
+		if err != nil {
+			return nil, err
+		}
+		defer rs.Close()
+		var ret []string
+		for rs.Next() {
+			var key string
+			err = rs.Scan(&key)
+			if err != nil {
+				return nil, err
+			}
+			ret = append(ret, key)
+		}
+		rs.Close()
+		return ret, nil
+	}()
+	if err != nil {
+		return err
+	}
+
 	qb := newQueryBuilder()
 	qb.Add(`SELECT key, doc_id, value FROM ` + v.mapperTable + ` WHERE deleted != TRUE AND key IN (`)
-	first := true
-	for k := range changedKeys {
-		if first {
-			first = !qb.AddIfNotZero(`$1`, k)
+	for i, id := range changedKeys {
+		if i == 0 {
+			qb.Add(`$1`, id)
 		} else {
-			qb.AddIfNotZero(", $1", k)
+			qb.Add(", $1", id)
 		}
 	}
 	qb.Add(")")
@@ -249,6 +282,15 @@ func (v *View) Refresh(ctx context.Context) error {
 	tmpKeys := []ViewReduceKey{}
 	tmpVals := []interface{}{}
 	singleReduceAndSave := func() error {
+		// remove key from changed keys
+		changedKeys = func(s []string, r string) []string {
+			for i, v := range s {
+				if v == r {
+					return append(s[:i], s[i+1:]...)
+				}
+			}
+			return s
+		}(changedKeys, tmpKey)
 		val, err := v.config.Reducer(tmpKeys, tmpVals, false)
 		if err != nil {
 			return fmt.Errorf("Reduce error: %v", err)
@@ -290,12 +332,19 @@ func (v *View) Refresh(ctx context.Context) error {
 		}
 	}
 	rs.Close()
-	if len(tmpKeys) > 0 {
-		err := singleReduceAndSave()
+	err = singleReduceAndSave()
+	if err != nil {
+		return err
+	}
+
+	// keys need to be complete removed
+	for _, k := range changedKeys {
+		_, err := v.sqldb.ExecContext(ctx, `UPDATE `+v.reducerTable+` SET deleted = TRUE WHERE key = $1`, k)
 		if err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
