@@ -129,6 +129,16 @@ func (db *DB) View(ctx context.Context, config ViewConfig) (*View, error) {
 		if err := checkName(reduceTable); err != nil {
 			return nil, err
 		}
+		_, err := db.sqlDB.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+		seq       BIGSERIAL,
+		key       TEXT,
+		value     JSONB,
+		deleted   BOOL DEFAULT FALSE,
+		PRIMARY KEY(seq),
+		UNIQUE(key))`, reduceTable))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	ret := &View{
@@ -138,25 +148,8 @@ func (db *DB) View(ctx context.Context, config ViewConfig) (*View, error) {
 		reducerTable: reduceTable,
 		metaStore:    db.metaStore.At("view").At(config.Name),
 	}
-	if ret.reducerTable != "" {
-		err = ret.createReduceTable(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
 
 	return ret, nil
-}
-
-func (v *View) createReduceTable(ctx context.Context) error {
-	_, err := v.sqldb.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-		seq       BIGSERIAL,
-		key       TEXT,
-		value     JSONB,
-		deleted   BOOL DEFAULT FALSE,
-		PRIMARY KEY(seq),
-		UNIQUE(key))`, v.reducerTable))
-	return err
 }
 
 // Refresh ensure the view is up-to-date.
@@ -169,12 +162,19 @@ func (v *View) Refresh(ctx context.Context) error {
 	}
 
 	seq := lastSeq
+	var changedDocID []string
 	err = v.config.Input.changes(ctx, lastSeq+1, func(doc *Document) error {
+		var err error
+		defer func() {
+			if err == nil {
+				changedDocID = append(changedDocID, doc.ID)
+			}
+		}()
 		seq = doc.Seq
 
 		// TODO: Need a transaction here.
 		// TODO: The ops can be batched.
-		_, err := v.sqldb.ExecContext(ctx, `UPDATE `+v.mapperTable+` SET deleted = TRUE WHERE doc_id = $1`, doc.ID)
+		_, err = v.sqldb.ExecContext(ctx, `UPDATE `+v.mapperTable+` SET deleted = TRUE WHERE doc_id = $1`, doc.ID)
 		if err != nil {
 			return err
 		}
@@ -182,28 +182,32 @@ func (v *View) Refresh(ctx context.Context) error {
 			return nil
 		}
 
+		var emitErr error
 		err = v.config.Mapper(doc, func(ve *ViewEntry) error {
 			var value interface{}
 			value = ve.Value
 
 			var key string
-			err = json.Unmarshal(ve.Key, &key)
-			if err != nil {
-				return err
+			emitErr = json.Unmarshal(ve.Key, &key)
+			if emitErr != nil {
+				return emitErr
 			}
 
-			_, err := v.sqldb.ExecContext(ctx,
+			_, emitErr = v.sqldb.ExecContext(ctx,
 				`INSERT INTO `+v.mapperTable+` (key, value, doc_id, doc_seq) VALUES ($1, $2, $3, $4)
 					ON CONFLICT (doc_id) DO UPDATE SET
 					key=excluded.key,
 					value=excluded.value,
 					doc_seq=excluded.doc_seq,
-					deleted=false;`,
+					deleted=FALSE;`,
 				key, value, doc.ID, doc.Seq)
-			return err
+			return emitErr
 		})
+		if emitErr != nil {
+			return fmt.Errorf("emit error: %v", emitErr)
+		}
 		if err != nil {
-			return fmt.Errorf("emit error: %v", err)
+			return fmt.Errorf("mapper error: %v", err)
 		}
 		return nil
 	})
@@ -218,20 +222,57 @@ func (v *View) Refresh(ctx context.Context) error {
 		return err
 	}
 
+	if len(changedDocID) == 0 {
+		return nil
+	}
 	if v.reducerTable == "" {
 		return nil
 	}
 
-	_, err = v.sqldb.ExecContext(ctx, `DROP TABLE `+v.reducerTable)
-	if err != nil {
-		return err
-	}
-	err = v.createReduceTable(ctx)
+	changedKeys, err := func() ([]string, error) {
+		qb := newQueryBuilder()
+		qb.Add(`SELECT DISTINCT key FROM ` + v.mapperTable + ` WHERE doc_id IN(`)
+		for i, id := range changedDocID {
+			if i == 0 {
+				qb.Add(`$1`, id)
+			} else {
+				qb.Add(", $1", id)
+			}
+		}
+		qb.Add(")")
+		rs, err := qb.Query(ctx, v.sqldb)
+		if err != nil {
+			return nil, err
+		}
+		defer rs.Close()
+		var ret []string
+		for rs.Next() {
+			var key string
+			err = rs.Scan(&key)
+			if err != nil {
+				return nil, err
+			}
+			ret = append(ret, key)
+		}
+		rs.Close()
+		return ret, nil
+	}()
 	if err != nil {
 		return err
 	}
 
-	rs, err := v.sqldb.QueryContext(ctx, `SELECT key, doc_id, value FROM `+v.mapperTable+` WHERE deleted != TRUE ORDER BY key ASC, doc_id ASC`)
+	qb := newQueryBuilder()
+	qb.Add(`SELECT key, doc_id, value FROM ` + v.mapperTable + ` WHERE deleted != TRUE AND key IN (`)
+	for i, id := range changedKeys {
+		if i == 0 {
+			qb.Add(`$1`, id)
+		} else {
+			qb.Add(", $1", id)
+		}
+	}
+	qb.Add(")")
+	qb.Add(` ORDER BY key ASC, doc_id ASC`)
+	rs, err := qb.Query(ctx, v.sqldb)
 	if err != nil {
 		return err
 	}
@@ -241,6 +282,15 @@ func (v *View) Refresh(ctx context.Context) error {
 	tmpKeys := []ViewReduceKey{}
 	tmpVals := []interface{}{}
 	singleReduceAndSave := func() error {
+		// remove key from changed keys
+		changedKeys = func(s []string, r string) []string {
+			for i, v := range s {
+				if v == r {
+					return append(s[:i], s[i+1:]...)
+				}
+			}
+			return s
+		}(changedKeys, tmpKey)
 		val, err := v.config.Reducer(tmpKeys, tmpVals, false)
 		if err != nil {
 			return fmt.Errorf("Reduce error: %v", err)
@@ -249,7 +299,11 @@ func (v *View) Refresh(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		_, err = v.sqldb.ExecContext(ctx, `INSERT INTO `+v.reducerTable+` (key, value) VALUES ($1, $2)`, tmpKey, bs)
+		_, err = v.sqldb.ExecContext(ctx, `INSERT INTO `+v.reducerTable+` (key, value) VALUES ($1, $2)
+				ON CONFLICT (key) DO UPDATE SET
+				key=excluded.key,
+				value=excluded.value,
+				deleted=false;`, tmpKey, bs)
 		return err
 	}
 	for rs.Next() {
@@ -278,12 +332,19 @@ func (v *View) Refresh(ctx context.Context) error {
 		}
 	}
 	rs.Close()
-	if len(tmpKeys) > 0 {
-		err := singleReduceAndSave()
+	err = singleReduceAndSave()
+	if err != nil {
+		return err
+	}
+
+	// keys need to be complete removed
+	for _, k := range changedKeys {
+		_, err := v.sqldb.ExecContext(ctx, `UPDATE `+v.reducerTable+` SET deleted = TRUE WHERE key = $1`, k)
 		if err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -368,9 +429,11 @@ func (v *View) queryMap(ctx context.Context, p ViewQueryParam) (ViewResult, erro
 
 	for rows.Next() {
 		r := ViewResultRow{}
-		if err := rows.Scan(&r.Key, &r.ID, &r.Value); err != nil {
+		var key string
+		if err := rows.Scan(&key, &r.ID, &r.Value); err != nil {
 			return ret, err
 		}
+		r.Key = key
 		ret.Rows = append(ret.Rows, r)
 	}
 	rows.Close()

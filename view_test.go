@@ -497,4 +497,52 @@ func TestQuery(t *testing.T) {
     ]
 }
 `)
+	err = tbl.Put(ctx, "p:3", 0, json.RawMessage(`{"title": "hello world", "tags": ["green", "red", "yellow"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err = view.Query(ctx, da.ViewQueryParam{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	equalJSONText(t, r, `{
+	    "rows": [
+	        {
+	            "value": 5
+	        }
+	    ]
+	}
+	`)
+	err = tbl.Delete(ctx, "p:3", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err = view.Query(ctx, da.ViewQueryParam{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	equalJSONText(t, r, `{
+	    "rows": [
+	        {
+	            "value": 2
+	        }
+	    ]
+	}
+	`)
+	err = tbl.Delete(ctx, "p:1", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err = view.Query(ctx, da.ViewQueryParam{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	equalJSONText(t, r, `{
+	    "rows": [
+	        {
+	            "value": 1
+	        }
+	    ]
+	}
+	`)
 }
